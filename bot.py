@@ -1,7 +1,7 @@
 import os
 import logging
-from datetime import datetime, timezone, timedelta
 import threading
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import httpx
@@ -16,23 +16,23 @@ from telegram.ext import (
     filters,
 )
 
-# Carrega variáveis do arquivo .env
-load_dotenv("bot.env")
+# Carrega .env localmente (no Render, usa automaticamente as Environment Variables do painel)
+load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 SITE_API_URL = os.getenv("SITE_API_URL", "").strip()
 SITE_API_KEY = os.getenv("SITE_API_KEY", "").strip()
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = int((os.getenv("ALLOWED_USER_ID") or "0").strip())
 
 if not TELEGRAM_TOKEN or not SITE_API_URL or not SITE_API_KEY:
     raise ValueError(
-        "Preencha TELEGRAM_TOKEN, SITE_API_URL e SITE_API_KEY no arquivo .env."
+        "Preencha TELEGRAM_TOKEN, SITE_API_URL e SITE_API_KEY nas variáveis de ambiente."
     )
 
-# Fuso horário de Brasília (UTC-3) sem depender do pacote tzdata no Windows
+# Fuso horário de Brasília (UTC-3)
 TZ_BRASIL = timezone(timedelta(hours=-3))
 
-# Estados da máquina de conversação
+# Estados da conversa
 TITULO, DATA, HORA, CONFIRMACAO = range(4)
 
 logging.basicConfig(
@@ -42,6 +42,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# --- Mini-servidor HTTP exigido pelo Render (Web Service Free) ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot online")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Evita poluir os logs do Render com pings do UptimeRobot
+
+
+def iniciar_servidor_health() -> None:
+    port = int(os.environ.get("PORT", "10000"))
+    logger.info("Servidor HTTP aberto na porta %s", port)
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+
+# --- Lógica do Bot ---
 def usuario_autorizado(update: Update) -> bool:
     """Garante que apenas o dono configurado consiga criar agendamentos."""
     user = update.effective_user
@@ -63,7 +85,7 @@ async def comando_meuid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if user:
         await update.message.reply_text(
             f"Seu User ID numérico é: `{user.id}`\n"
-            "Coloque esse número em ALLOWED_USER_ID no arquivo .env e reinicie o bot.",
+            "Coloque esse número na variável ALLOWED_USER_ID.",
             parse_mode="Markdown",
         )
 
@@ -71,11 +93,10 @@ async def comando_meuid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def iniciar_agendamento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not usuario_autorizado(update):
         await update.message.reply_text(
-            "Acesso negado. Use /meuid para verificar se seu ID está liberado no .env."
+            "Acesso negado. Use /meuid para verificar se seu ID está liberado em ALLOWED_USER_ID."
         )
         return ConversationHandler.END
 
-    # Limpa qualquer rascunho anterior caso o usuário reinicie o comando
     context.user_data.clear()
 
     await update.message.reply_text(
@@ -234,6 +255,9 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def main() -> None:
+    # Inicia a porta HTTP antes do polling para o Render marcar o serviço como "Live"
+    threading.Thread(target=iniciar_servidor_health, daemon=True).start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -248,7 +272,7 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
         allow_reentry=True,
-        conversation_timeout=300,  # Encerra se ficar 5 min sem resposta
+        conversation_timeout=300,
     )
 
     app.add_handler(CommandHandler("start", comando_start))
@@ -256,26 +280,6 @@ def main() -> None:
     app.add_handler(conv_handler)
 
     logger.info("Bot iniciado com sucesso. Aguardando comandos...")
-    # drop_pending_updates=True evita processar mensagens antigas acumuladas offline
-    
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot online")
-
-        def do_HEAD(self):
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, format, *args):
-            pass  # Evita poluir os logs do Render com pings
-
-
-        def iniciar_servidor_health() -> None:
-            port = int(os.environ.get("PORT", "10000"))
-            HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-
     app.run_polling(drop_pending_updates=True)
 
 
